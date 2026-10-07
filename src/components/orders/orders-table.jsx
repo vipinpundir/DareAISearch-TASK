@@ -1,8 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useSearchParams } from "next/navigation";
 
 const statuses = ["Delivered", "Processing", "Cancelled"];
+const sortFields = ["id", "customer", "date", "amount", "status"];
+const rowHeight = 72;
+const headerHeight = 40;
+const viewportHeight = 520;
+const overscan = 5;
 
 const statusStyles = {
   Delivered: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
@@ -21,6 +34,37 @@ const dateFormatter = new Intl.DateTimeFormat("en-IN", {
   year: "numeric",
 });
 
+const OrderRow = memo(function OrderRow({ order, index }) {
+  return (
+    <tr
+      aria-rowindex={index + 2}
+      className="h-[72px] text-slate-700"
+      style={{ height: rowHeight }}
+    >
+      <td className="whitespace-nowrap px-5 py-0 font-medium text-slate-900">
+        {order.id}
+      </td>
+      <td className="whitespace-nowrap px-5 py-0">
+        <p className="font-medium text-slate-800">{order.customer}</p>
+        <p className="mt-0.5 text-xs text-slate-500">{order.email}</p>
+      </td>
+      <td className="whitespace-nowrap px-5 py-0">
+        {dateFormatter.format(new Date(order.date))}
+      </td>
+      <td className="whitespace-nowrap px-5 py-0 font-medium">
+        {currency.format(order.amount)}
+      </td>
+      <td className="whitespace-nowrap px-5 py-0">
+        <span
+          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${statusStyles[order.status]}`}
+        >
+          {order.status}
+        </span>
+      </td>
+    </tr>
+  );
+});
+
 function isOrdersApiResponse(value) {
   if (typeof value !== "object" || value === null) return false;
 
@@ -32,7 +76,7 @@ function isOrdersApiResponse(value) {
         typeof order.customer === "string" &&
         typeof order.email === "string" &&
         typeof order.date === "string" &&
-        typeof order.amount === "number" &&
+        Number.isFinite(order.amount) &&
         statuses.includes(order.status),
     ) &&
     typeof value.pagination === "object" &&
@@ -45,7 +89,7 @@ function isOrdersApiResponse(value) {
     value.summary !== null &&
     Number.isInteger(value.summary.totalOrders) &&
     Number.isInteger(value.summary.processingOrders) &&
-    typeof value.summary.revenue === "number"
+    Number.isFinite(value.summary.revenue)
   );
 }
 
@@ -67,42 +111,169 @@ function apiErrorMessage(value) {
   return null;
 }
 
+function readExplorerState(params) {
+  const requestedStatus = params.get("status") ?? "all";
+  const requestedSort = params.get("sortBy") ?? "date";
+  const requestedDirection = params.get("sortOrder") ?? "desc";
+  const requestedPageSize = Number(params.get("pageSize") ?? 10);
+  const requestedPage = Number(params.get("page") ?? 1);
+
+  return {
+    search: (params.get("search") ?? "").slice(0, 100),
+    status: statuses.includes(requestedStatus) ? requestedStatus : "all",
+    sortBy: sortFields.includes(requestedSort) ? requestedSort : "date",
+    sortOrder: requestedDirection === "asc" ? "asc" : "desc",
+    page:
+      Number.isSafeInteger(requestedPage) && requestedPage > 0
+        ? requestedPage
+        : 1,
+    pageSize: [10, 25, 50, 100].includes(requestedPageSize)
+      ? requestedPageSize
+      : 10,
+  };
+}
+
+function writeExplorerState(state) {
+  const params = new URLSearchParams();
+  if (state.search) params.set("search", state.search);
+  if (state.status !== "all") params.set("status", state.status);
+  if (state.sortBy !== "date") params.set("sortBy", state.sortBy);
+  if (state.sortOrder !== "desc") params.set("sortOrder", state.sortOrder);
+  if (state.page !== 1) params.set("page", String(state.page));
+  if (state.pageSize !== 10) params.set("pageSize", String(state.pageSize));
+
+  const query = params.toString();
+  const url = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+  if (`${window.location.pathname}${window.location.search}${window.location.hash}` === url) {
+    return false;
+  }
+
+  window.history.pushState(null, "", url);
+  return true;
+}
+
+function VirtualizedRows({ orders, scrollTop, total, page, pageSize }) {
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+  const firstVisible = Math.max(
+    0,
+    Math.floor(Math.max(0, scrollTop - headerHeight) / rowHeight) - overscan,
+  );
+  const lastVisible = Math.min(orders.length, firstVisible + visibleCount);
+  const visibleOrders = orders.slice(firstVisible, lastVisible);
+  const topSpace = firstVisible * rowHeight;
+  const bottomSpace = (orders.length - lastVisible) * rowHeight;
+
+  return (
+    <tbody className="divide-y divide-slate-100">
+      {topSpace > 0 && (
+        <tr aria-hidden="true" role="presentation">
+          <td
+            colSpan={5}
+            className="p-0"
+            style={{ height: topSpace }}
+          />
+        </tr>
+      )}
+      {visibleOrders.map((order, offset) => (
+        <OrderRow
+          key={order.id}
+          order={order}
+          index={(page - 1) * pageSize + firstVisible + offset}
+        />
+      ))}
+      {bottomSpace > 0 && (
+        <tr aria-hidden="true" role="presentation">
+          <td
+            colSpan={5}
+            className="p-0"
+            style={{ height: bottomSpace }}
+          />
+        </tr>
+      )}
+      {orders.length === 0 && total === 0 && (
+        <tr>
+          <td colSpan={5} className="px-5 py-12 text-center">
+            <p className="text-sm font-medium text-slate-800">No orders found</p>
+            <p className="mt-1 text-sm text-slate-500">
+              Try another search or clear the current filters.
+            </p>
+          </td>
+        </tr>
+      )}
+    </tbody>
+  );
+}
+
 export function OrdersTable({ onSummaryChange }) {
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("all");
-  const [sortBy, setSortBy] = useState("date");
-  const [sortOrder, setSortOrder] = useState("desc");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const searchParams = useSearchParams();
+  const paramsKey = searchParams.toString();
+  const explorer = useMemo(
+    () => readExplorerState(new URLSearchParams(paramsKey)),
+    [paramsKey],
+  );
+  const [searchInput, setSearchInput] = useState(explorer.search);
   const [requestId, setRequestId] = useState(0);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const scrollContainerRef = useRef(null);
+  const scrollFrameRef = useRef(null);
+  const requestSequenceRef = useRef(0);
+  const activeRequestRef = useRef(null);
+
+  const beginRequest = useCallback(() => {
+    requestSequenceRef.current += 1;
+    activeRequestRef.current?.abort();
+    activeRequestRef.current = null;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setScrollTop(0);
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+  }, []);
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => setSearch(searchInput.trim()), 350);
+    function restoreSearchFromUrl() {
+      const nextSearch =
+        new URLSearchParams(window.location.search).get("search") ?? "";
+      setSearchInput(nextSearch.slice(0, 100));
+      beginRequest();
+    }
+
+    window.addEventListener("popstate", restoreSearchFromUrl);
+    return () => window.removeEventListener("popstate", restoreSearchFromUrl);
+  }, [beginRequest]);
+
+  useEffect(() => {
+    if (searchInput.trim() === explorer.search) return undefined;
+
+    const timeout = window.setTimeout(() => {
+      beginRequest();
+      writeExplorerState({ ...explorer, search: searchInput.trim(), page: 1 });
+    }, 350);
     return () => window.clearTimeout(timeout);
-  }, [searchInput]);
+  }, [searchInput, explorer, beginRequest]);
 
   useEffect(() => {
+    const sequence = ++requestSequenceRef.current;
     const controller = new AbortController();
+    activeRequestRef.current = controller;
     const params = new URLSearchParams({
-      search,
-      status,
-      sortBy,
-      sortOrder,
-      page: String(page),
-      pageSize: String(pageSize),
+      search: explorer.search,
+      status: explorer.status,
+      sortBy: explorer.sortBy,
+      sortOrder: explorer.sortOrder,
+      page: String(explorer.page),
+      pageSize: String(explorer.pageSize),
     });
+    let active = true;
 
     async function loadOrders() {
-      setLoading(true);
-      setError(null);
-
       try {
         const response = await fetch(`/api/orders?${params}`, {
           signal: controller.signal,
+          cache: "no-store",
         });
         const payload = await response.json();
 
@@ -112,28 +283,84 @@ export function OrdersTable({ onSummaryChange }) {
               `Unable to load orders (HTTP ${response.status}).`,
           );
         }
-
         if (!isOrdersApiResponse(payload)) {
           throw new Error("The orders service returned an invalid response.");
         }
+        if (!active || sequence !== requestSequenceRef.current) return;
 
         setResult(payload);
         onSummaryChange(payload.summary);
       } catch (requestError) {
-        if (controller.signal.aborted) return;
+        if (
+          !active ||
+          controller.signal.aborted ||
+          sequence !== requestSequenceRef.current
+        ) {
+          return;
+        }
+        setResult(null);
         setError(
           requestError instanceof Error
             ? requestError.message
             : "Unable to load orders. Please try again.",
         );
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (active && sequence === requestSequenceRef.current) {
+          setLoading(false);
+        }
       }
     }
 
     void loadOrders();
-    return () => controller.abort();
-  }, [search, status, sortBy, sortOrder, page, pageSize, requestId, onSummaryChange]);
+    return () => {
+      active = false;
+      controller.abort();
+      if (activeRequestRef.current === controller) {
+        activeRequestRef.current = null;
+      }
+    };
+  }, [
+    explorer.search,
+    explorer.status,
+    explorer.sortBy,
+    explorer.sortOrder,
+    explorer.page,
+    explorer.pageSize,
+    requestId,
+    onSummaryChange,
+  ]);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  const updateExplorer = useCallback(
+    (changes) => {
+      const changed = writeExplorerState({
+        ...explorer,
+        search: searchInput.trim(),
+        ...changes,
+      });
+      if (changed) beginRequest();
+    },
+    [explorer, searchInput, beginRequest],
+  );
+
+  const handleScroll = useCallback((event) => {
+    const nextScrollTop = event.currentTarget.scrollTop;
+    if (scrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      setScrollTop(nextScrollTop);
+      scrollFrameRef.current = null;
+    });
+  }, []);
 
   const orders = result?.data ?? [];
   const pagination = result?.pagination;
@@ -160,7 +387,9 @@ export function OrdersTable({ onSummaryChange }) {
           </p>
         </div>
         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
-          {pagination ? `${pagination.total.toLocaleString("en-IN")} orders` : "— orders"}
+          {pagination
+            ? `${pagination.total.toLocaleString("en-IN")} orders`
+            : "— orders"}
         </span>
       </div>
 
@@ -170,10 +399,8 @@ export function OrdersTable({ onSummaryChange }) {
           <input
             type="search"
             value={searchInput}
-            onChange={(event) => {
-              setSearchInput(event.target.value);
-              setPage(1);
-            }}
+            maxLength={100}
+            onChange={(event) => setSearchInput(event.target.value)}
             placeholder="Search order, customer, or email"
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
           />
@@ -181,27 +408,27 @@ export function OrdersTable({ onSummaryChange }) {
         <label className="block">
           <span className="sr-only">Filter by status</span>
           <select
-            value={status}
-            onChange={(event) => {
-              setStatus(event.target.value);
-              setPage(1);
-            }}
+            value={explorer.status}
+            onChange={(event) =>
+              updateExplorer({ status: event.target.value, page: 1 })
+            }
             className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
           >
             <option value="all">All statuses</option>
-            <option value="Delivered">Delivered</option>
-            <option value="Processing">Processing</option>
-            <option value="Cancelled">Cancelled</option>
+            {statuses.map((status) => (
+              <option key={status} value={status}>
+                {status}
+              </option>
+            ))}
           </select>
         </label>
         <label className="block">
           <span className="sr-only">Sort orders by</span>
           <select
-            value={sortBy}
-            onChange={(event) => {
-              setSortBy(event.target.value);
-              setPage(1);
-            }}
+            value={explorer.sortBy}
+            onChange={(event) =>
+              updateExplorer({ sortBy: event.target.value, page: 1 })
+            }
             className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
           >
             <option value="date">Sort: Date</option>
@@ -213,11 +440,16 @@ export function OrdersTable({ onSummaryChange }) {
         </label>
         <button
           type="button"
-          onClick={() => setSortOrder((current) => current === "asc" ? "desc" : "asc")}
-          aria-label={`Sort ${sortOrder === "asc" ? "ascending" : "descending"}; click to reverse`}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          onClick={() =>
+            updateExplorer({
+              sortOrder: explorer.sortOrder === "asc" ? "desc" : "asc",
+              page: 1,
+            })
+          }
+          aria-label={`Change sort direction from ${explorer.sortOrder === "asc" ? "ascending" : "descending"}`}
+          className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2"
         >
-          {sortOrder === "asc" ? "Ascending ↑" : "Descending ↓"}
+          {explorer.sortOrder === "asc" ? "Ascending ↑" : "Descending ↓"}
         </button>
       </div>
 
@@ -229,8 +461,11 @@ export function OrdersTable({ onSummaryChange }) {
           <span>{error}</span>
           <button
             type="button"
-            onClick={() => setRequestId((current) => current + 1)}
-            className="font-semibold underline underline-offset-2"
+            onClick={() => {
+              beginRequest();
+              setRequestId((current) => current + 1);
+            }}
+            className="rounded font-semibold underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-700"
           >
             Retry
           </button>
@@ -238,101 +473,119 @@ export function OrdersTable({ onSummaryChange }) {
       )}
 
       {loading && (
-        <p role="status" className="border-b border-slate-100 px-5 py-2 text-xs text-slate-500">
+        <p
+          role="status"
+          aria-live="polite"
+          className="border-b border-slate-100 px-5 py-2 text-xs text-slate-500"
+        >
           {result ? "Updating orders…" : "Loading orders…"}
         </p>
       )}
 
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        role="region"
+        aria-label="Order results"
+        tabIndex={0}
+        className="h-[520px] overflow-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"
+      >
+        <table
+          aria-rowcount={(pagination?.total ?? 0) + 1}
+          aria-colcount={5}
+          className="w-full min-w-[720px] table-fixed text-left text-sm"
+        >
+          <thead className="sticky top-0 z-10 h-10 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th scope="col" className="px-5 py-3 font-medium">Order</th>
-              <th scope="col" className="px-5 py-3 font-medium">Customer</th>
-              <th scope="col" className="px-5 py-3 font-medium">Date</th>
-              <th scope="col" className="px-5 py-3 font-medium">Amount</th>
-              <th scope="col" className="px-5 py-3 font-medium">Status</th>
+              <th scope="col" className="w-[16%] px-5 py-3 font-medium">Order</th>
+              <th scope="col" className="w-[32%] px-5 py-3 font-medium">Customer</th>
+              <th scope="col" className="w-[18%] px-5 py-3 font-medium">Date</th>
+              <th scope="col" className="w-[18%] px-5 py-3 font-medium">Amount</th>
+              <th scope="col" className="w-[16%] px-5 py-3 font-medium">Status</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
-            {orders.map((order) => (
-              <tr key={order.id} className="text-slate-700">
-                <td className="whitespace-nowrap px-5 py-4 font-medium text-slate-900">
-                  {order.id}
-                </td>
-                <td className="whitespace-nowrap px-5 py-4">
-                  <p className="font-medium text-slate-800">{order.customer}</p>
-                  <p className="mt-0.5 text-xs text-slate-500">{order.email}</p>
-                </td>
-                <td className="whitespace-nowrap px-5 py-4">
-                  {dateFormatter.format(new Date(order.date))}
-                </td>
-                <td className="whitespace-nowrap px-5 py-4 font-medium">
-                  {currency.format(order.amount)}
-                </td>
-                <td className="whitespace-nowrap px-5 py-4">
-                  <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${statusStyles[order.status]}`}>
-                    {order.status}
-                  </span>
-                </td>
-              </tr>
-            ))}
-            {!loading && orders.length === 0 && (
-              <tr>
-                <td colSpan={5} className="px-5 py-10 text-center text-sm text-slate-500">
-                  {error ? "Orders could not be loaded." : "No orders match these filters."}
-                </td>
-              </tr>
-            )}
-          </tbody>
+          {loading && !result ? (
+            <tbody aria-label="Loading orders">
+              {Array.from({ length: 7 }, (_, index) => (
+                <tr
+                  key={`loading-${index}`}
+                  aria-hidden="true"
+                  className="h-[72px]"
+                >
+                  {Array.from({ length: 5 }, (_, cellIndex) => (
+                    <td key={cellIndex} className="px-5 py-0">
+                      <span className="block h-3 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          ) : (
+            <VirtualizedRows
+              orders={orders}
+              scrollTop={scrollTop}
+              total={pagination?.total ?? 0}
+              page={pagination?.page ?? explorer.page}
+              pageSize={pagination?.pageSize ?? explorer.pageSize}
+            />
+          )}
         </table>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3">
         <div className="flex items-center gap-2 text-sm text-slate-500">
-          <span>
+          <span aria-live="polite">
             {pagination
               ? `Showing ${firstItem.toLocaleString("en-IN")}–${lastItem.toLocaleString("en-IN")} of ${pagination.total.toLocaleString("en-IN")}`
-              : "Waiting for results"}
+              : loading
+                ? "Loading results"
+                : "Results unavailable"}
           </span>
           <label>
             <span className="sr-only">Orders per page</span>
             <select
-              value={pageSize}
-              onChange={(event) => {
-                setPageSize(Number(event.target.value));
-                setPage(1);
-              }}
-              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+              value={explorer.pageSize}
+              onChange={(event) =>
+                updateExplorer({
+                  pageSize: Number(event.target.value),
+                  page: 1,
+                })
+              }
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
             >
-              <option value={10}>10 / page</option>
-              <option value={25}>25 / page</option>
-              <option value={50}>50 / page</option>
-              <option value={100}>100 / page</option>
+              {[10, 25, 50, 100].map((size) => (
+                <option key={size} value={size}>
+                  {size} / page
+                </option>
+              ))}
             </select>
           </label>
         </div>
-        <div className="flex items-center gap-2">
+        <nav aria-label="Orders pagination" className="flex items-center gap-2">
           <button
             type="button"
-            disabled={page <= 1}
-            onClick={() => setPage((current) => current - 1)}
-            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={loading || explorer.page <= 1}
+            onClick={() => updateExplorer({ page: explorer.page - 1 })}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Previous
           </button>
           <span className="text-sm text-slate-500">
-            Page {page} of {Math.max(pagination?.totalPages ?? 0, 1)}
+            Page {explorer.page} of {Math.max(pagination?.totalPages ?? 0, 1)}
           </span>
           <button
             type="button"
-            disabled={!pagination || page >= pagination.totalPages}
-            onClick={() => setPage((current) => current + 1)}
-            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={
+              loading ||
+              !pagination ||
+              explorer.page >= pagination.totalPages
+            }
+            onClick={() => updateExplorer({ page: explorer.page + 1 })}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Next
           </button>
-        </div>
+        </nav>
       </div>
     </section>
   );
