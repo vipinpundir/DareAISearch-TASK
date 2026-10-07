@@ -43,3 +43,7 @@ HTTP 400 without simulation delay.
 
 Search is debounced in the UI. Superseded requests are aborted and ignored;
 the results table virtualizes each page so only the visible rows are mounted.
+
+Order IDs link to a detail drawer using the `order` query parameter. Drawer URLs
+are shareable; opening one preserves the list query and scroll position, and
+closing it restores focus to the order link.

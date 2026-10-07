@@ -34,16 +34,38 @@ const dateFormatter = new Intl.DateTimeFormat("en-IN", {
   year: "numeric",
 });
 
-const OrderRow = memo(function OrderRow({ order, index }) {
+const OrderRow = memo(function OrderRow({ order, index, detailHref, onOpenOrder }) {
   return (
     <tr
       aria-rowindex={index + 2}
       className="h-[72px] text-slate-700"
       style={{ height: rowHeight }}
     >
-      <td className="whitespace-nowrap px-5 py-0 font-medium text-slate-900">
-        {order.id}
-      </td>
+      <th
+        scope="row"
+        className="whitespace-nowrap px-5 py-0 text-left font-medium text-slate-900"
+      >
+        <a
+          href={detailHref}
+          data-order-link={order.id}
+          onClick={(event) => {
+            if (
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey
+            ) {
+              return;
+            }
+            event.preventDefault();
+            onOpenOrder(order.id, detailHref, event.currentTarget);
+          }}
+          className="rounded text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2"
+        >
+          {order.id}
+        </a>
+      </th>
       <td className="whitespace-nowrap px-5 py-0">
         <p className="font-medium text-slate-800">{order.customer}</p>
         <p className="mt-0.5 text-xs text-slate-500">{order.email}</p>
@@ -152,7 +174,16 @@ function writeExplorerState(state) {
   return true;
 }
 
-function VirtualizedRows({ orders, scrollTop, total, page, pageSize }) {
+function VirtualizedRows({
+  orders,
+  scrollTop,
+  total,
+  page,
+  pageSize,
+  error,
+  createDetailHref,
+  onOpenOrder,
+}) {
   const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
   const firstVisible = Math.max(
     0,
@@ -179,6 +210,8 @@ function VirtualizedRows({ orders, scrollTop, total, page, pageSize }) {
           key={order.id}
           order={order}
           index={(page - 1) * pageSize + firstVisible + offset}
+          detailHref={createDetailHref(order.id)}
+          onOpenOrder={onOpenOrder}
         />
       ))}
       {bottomSpace > 0 && (
@@ -193,10 +226,20 @@ function VirtualizedRows({ orders, scrollTop, total, page, pageSize }) {
       {orders.length === 0 && total === 0 && (
         <tr>
           <td colSpan={5} className="px-5 py-12 text-center">
-            <p className="text-sm font-medium text-slate-800">No orders found</p>
-            <p className="mt-1 text-sm text-slate-500">
-              Try another search or clear the current filters.
-            </p>
+            {error ? (
+              <p className="text-sm text-slate-600">
+                Results are unavailable. Retry the request to load orders.
+              </p>
+            ) : (
+              <>
+                <p className="text-sm font-medium text-slate-800">
+                  No orders found
+                </p>
+                <p className="mt-1 text-sm text-slate-500">
+                  Try another search or clear the current filters.
+                </p>
+              </>
+            )}
           </td>
         </tr>
       )}
@@ -204,7 +247,7 @@ function VirtualizedRows({ orders, scrollTop, total, page, pageSize }) {
   );
 }
 
-export function OrdersTable({ onSummaryChange }) {
+export function OrdersTable({ onSummaryChange, onOpenOrder }) {
   const searchParams = useSearchParams();
   const paramsKey = searchParams.toString();
   const explorer = useMemo(
@@ -235,15 +278,23 @@ export function OrdersTable({ onSummaryChange }) {
 
   useEffect(() => {
     function restoreSearchFromUrl() {
-      const nextSearch =
-        new URLSearchParams(window.location.search).get("search") ?? "";
-      setSearchInput(nextSearch.slice(0, 100));
-      beginRequest();
+      const nextState = readExplorerState(
+        new URLSearchParams(window.location.search),
+      );
+      setSearchInput(nextState.search);
+      const listStateChanged =
+        nextState.search !== explorer.search ||
+        nextState.status !== explorer.status ||
+        nextState.sortBy !== explorer.sortBy ||
+        nextState.sortOrder !== explorer.sortOrder ||
+        nextState.page !== explorer.page ||
+        nextState.pageSize !== explorer.pageSize;
+      if (listStateChanged) beginRequest();
     }
 
     window.addEventListener("popstate", restoreSearchFromUrl);
     return () => window.removeEventListener("popstate", restoreSearchFromUrl);
-  }, [beginRequest]);
+  }, [beginRequest, explorer]);
 
   useEffect(() => {
     if (searchInput.trim() === explorer.search) return undefined;
@@ -351,6 +402,18 @@ export function OrdersTable({ onSummaryChange }) {
     [explorer, searchInput, beginRequest],
   );
 
+  const createDetailHref = useCallback(
+    (orderId) => {
+      const detailParams = new URLSearchParams(paramsKey);
+      const currentSearch = searchInput.trim();
+      if (currentSearch) detailParams.set("search", currentSearch);
+      else detailParams.delete("search");
+      detailParams.set("order", orderId);
+      return `/orders?${detailParams.toString()}`;
+    },
+    [paramsKey, searchInput],
+  );
+
   const handleScroll = useCallback((event) => {
     const nextScrollTop = event.currentTarget.scrollTop;
     if (scrollFrameRef.current !== null) {
@@ -361,6 +424,14 @@ export function OrdersTable({ onSummaryChange }) {
       scrollFrameRef.current = null;
     });
   }, []);
+
+  const handleSearchChange = useCallback(
+    (event) => {
+      beginRequest();
+      setSearchInput(event.target.value);
+    },
+    [beginRequest],
+  );
 
   const orders = result?.data ?? [];
   const pagination = result?.pagination;
@@ -386,7 +457,11 @@ export function OrdersTable({ onSummaryChange }) {
             Search and refine your orders.
           </p>
         </div>
-        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
+        <span
+          aria-live="polite"
+          aria-atomic="true"
+          className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600"
+        >
           {pagination
             ? `${pagination.total.toLocaleString("en-IN")} orders`
             : "— orders"}
@@ -400,7 +475,7 @@ export function OrdersTable({ onSummaryChange }) {
             type="search"
             value={searchInput}
             maxLength={100}
-            onChange={(event) => setSearchInput(event.target.value)}
+            onChange={handleSearchChange}
             placeholder="Search order, customer, or email"
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
           />
@@ -491,10 +566,14 @@ export function OrdersTable({ onSummaryChange }) {
         className="h-[520px] overflow-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"
       >
         <table
-          aria-rowcount={(pagination?.total ?? 0) + 1}
+          aria-rowcount={pagination ? pagination.total + 1 : undefined}
+          aria-busy={loading}
           aria-colcount={5}
           className="w-full min-w-[720px] table-fixed text-left text-sm"
         >
+          <caption className="sr-only">
+            Orders matching the current search and filters
+          </caption>
           <thead className="sticky top-0 z-10 h-10 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
             <tr>
               <th scope="col" className="w-[16%] px-5 py-3 font-medium">Order</th>
@@ -527,6 +606,9 @@ export function OrdersTable({ onSummaryChange }) {
               total={pagination?.total ?? 0}
               page={pagination?.page ?? explorer.page}
               pageSize={pagination?.pageSize ?? explorer.pageSize}
+              error={error}
+              createDetailHref={createDetailHref}
+              onOpenOrder={onOpenOrder}
             />
           )}
         </table>
@@ -534,7 +616,7 @@ export function OrdersTable({ onSummaryChange }) {
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3">
         <div className="flex items-center gap-2 text-sm text-slate-500">
-          <span aria-live="polite">
+          <span aria-live="polite" aria-atomic="true">
             {pagination
               ? `Showing ${firstItem.toLocaleString("en-IN")}–${lastItem.toLocaleString("en-IN")} of ${pagination.total.toLocaleString("en-IN")}`
               : loading
